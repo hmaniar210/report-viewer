@@ -1,0 +1,8 @@
+streamlit==1.38.0
+# Pinned: latest pyarrow/numpy combos have crashed (segfault) with streamlit's
+# internal Arrow serialization when left unpinned. Keep these in sync if you
+# bump streamlit.
+numpy==1.26.4
+pandas==2.1.4
+pyarrow==14.0.2
+

@@ -1,0 +1,19 @@
+# Report data (user-uploaded/generated JSON reports)
+*.json
+!tests/fixtures/*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Streamlit
+.streamlit/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+.venv
