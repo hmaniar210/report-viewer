@@ -471,7 +471,19 @@ def render_report(data: dict) -> None:
 
 WATCH_FILE_ENV = "REPORT_FILE"
 WATCH_DIR_ENV = "REPORT_DIR"
-REFRESH_INTERVALS = {"2s": 2, "5s": 5, "10s": 10, "30s": 30, "1 min": 60}
+# Refresh cadence options. Kept deliberately on the calm side (minutes, with one
+# 30s option for the impatient) — a live report doesn't need second-by-second
+# polling, and slower refreshes are gentler on large reports.
+REFRESH_INTERVALS = {
+    "30s": 30,
+    "1 min": 60,
+    "2 min": 120,
+    "5 min": 300,
+    "10 min": 600,
+    "15 min": 900,
+    "30 min": 1800,
+}
+_DEFAULT_INTERVAL = "1 min"
 _LAST_GOOD_KEY = "_last_good_report"
 
 
@@ -512,7 +524,7 @@ def _auto_refresh_controls(default_on: bool) -> tuple[bool, int]:
     label = st.sidebar.select_slider(
         "Refresh every",
         options=list(REFRESH_INTERVALS),
-        value="5s",
+        value=_DEFAULT_INTERVAL,
         key="refresh_interval",
         disabled=not auto,
     )
@@ -574,17 +586,31 @@ def _run_watch_mode(watch_file: Path | None, watch_dir: Path | None) -> None:
             "it updates as your test run rewrites the file."
         )
     elif watch_dir is not None:
-        names = [p.name for p in _list_reports(watch_dir)]
+        reports = _list_reports(watch_dir)
+        names = [p.name for p in reports]
         if names:
             options = ["Newest"] + names
             if st.session_state.get("watch_choice") not in options:
                 st.session_state["watch_choice"] = "Newest"
             choice = st.sidebar.selectbox("File to track", options, key="watch_choice")
-            st.sidebar.caption("Pick a file, or “Newest” to follow the latest in the folder.")
+            st.sidebar.caption(
+                f"{len(names)} report(s) in the folder — switch anytime; the one you "
+                "pick is live-tracked. “Newest” always follows the most recent."
+            )
             if choice != "Newest":
                 pinned = watch_dir / choice
+            # A quick at-a-glance list of every report available to switch to.
+            picker = st.sidebar.expander(f"All reports ({len(names)})", expanded=False)
+            active = pinned if pinned is not None else (reports[0] if reports else None)
+            for p in reports:
+                try:
+                    mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%d %b %H:%M")
+                except OSError:
+                    mtime = "—"
+                marker = "▶ " if (active is not None and p == active) else ""
+                picker.markdown(f"{marker}`{p.name}` · updated {mtime}")
         else:
-            st.sidebar.info("No report JSONs in the watched folder yet.")
+            st.sidebar.info("No report JSONs in the folder yet.")
 
     auto, interval = _auto_refresh_controls(default_on=True)
 

@@ -412,8 +412,33 @@ def test_watch_mode_shows_refresh_and_file_controls(monkeypatch, tmp_path, repor
     assert any(s.label == "File to track" for s in at.selectbox)
     assert any(s.label == "Refresh every" for s in at.select_slider)
     assert any("Refresh now" in b.label for b in at.button)
+    # Refresh cadence defaults to minutes, not aggressive seconds.
+    interval = next(s for s in at.select_slider if s.label == "Refresh every")
+    assert interval.value == "1 min"
     # …and the report itself still renders alongside them.
     assert any(t.value == "WDIO Test Report" for t in at.title)
+
+
+def test_watch_mode_lists_multiple_reports_to_switch(monkeypatch, tmp_path, report_data):
+    """Given a folder, every report is offered in the picker so you can switch
+    between them (and live-track whichever you choose)."""
+    (tmp_path / "run_a.json").write_text(json.dumps(report_data))
+    (tmp_path / "run_b.json").write_text(json.dumps({"developer": "b", "sessions": []}))
+    monkeypatch.delenv("REPORT_FILE", raising=False)
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    picker = next(s for s in at.selectbox if s.label == "File to track")
+    assert set(picker.options) >= {"Newest", "run_a.json", "run_b.json"}
+
+
+def test_refresh_intervals_are_minute_scale():
+    """The cadence options should be calm (a 1-minute option exists, default 1 min)."""
+    assert app.REFRESH_INTERVALS.get("1 min") == 60
+    assert app._DEFAULT_INTERVAL == "1 min"
+    assert max(app.REFRESH_INTERVALS.values()) >= 600  # at least a 10-minute option
 
 
 def test_render_live_tolerates_mid_write_json(tmp_path, report_data):

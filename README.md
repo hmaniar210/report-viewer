@@ -123,18 +123,20 @@ sidebar's "Clear report" button.
 
 ```sh
 cd report-viewer
-./quickstart.sh /path/to/other-repo/reports/exec.json   # track ONE file live
-# or just: ./quickstart.sh          (watches ./reports)
+./quickstart.sh /path/to/other-repo/reports          # a FOLDER → multi-report + switching
+./quickstart.sh /path/to/other-repo/reports/exec.json # a single FILE → track just that one
+# or just: ./quickstart.sh                             # defaults to ./reports
 ```
 
 `quickstart.sh` makes sure Docker is running — **starting Docker Desktop for you
 on macOS and waiting until it's ready** — then builds and starts the app, waits
 until it's actually serving, and opens `http://localhost:8501` in your browser.
 
-Give it the **path to your report file** — the one your test run keeps rewriting,
-wherever it lives — and it tracks that exact file live, mounting its folder
-read-only so the container can see updates, with no copying. Pass a folder
-instead to watch a whole directory, or nothing to use `./reports`.
+Give it a **folder** and the sidebar lists every report in it so you can switch
+between them and live-track whichever you pick. Give it a **single file** (the
+one your test run keeps rewriting, wherever it lives) and it tracks just that one
+live. Either way the path is mounted read-only and read in place — nothing is
+copied. Pass nothing to use `./reports`.
 
 - Stop + clean (also quits Docker Desktop): `./quickstart.sh down`
 - Follow logs: `./quickstart.sh logs`
@@ -185,8 +187,10 @@ auto-refreshes on a timer. Only these operator-set env vars enable disk reads �
 the web UI never accepts a filesystem path, so a visitor on your network can't
 use the app to read arbitrary files off the host.
 
-- `REPORT_DIR=/path/to/folder` — watch a folder; the viewer reads the **newest**
-  `*.json` in it (or pin a specific file from the sidebar).
+- `REPORT_DIR=/path/to/folder` — watch a **folder of reports**: the sidebar lists
+  every `*.json` in it so you can **switch between reports** and live-track
+  whichever you pick (or choose **Newest** to always follow the most recently
+  updated one).
 - `REPORT_FILE=/path/to/report.json` — watch a single fixed file.
 
 Run locally against a folder:
@@ -195,10 +199,13 @@ Run locally against a folder:
 REPORT_DIR=./reports streamlit run app.py
 ```
 
-In watch mode the sidebar gains a **File to track** picker, an **Auto-refresh**
-toggle, a **Refresh every** interval, and a **🔄 Refresh now** button. A file
-caught mid-write (a test run rewriting it) is tolerated: the last good report
-stays on screen with a notice until the next successful read.
+In watch mode the sidebar gains a **File to track** picker (with an *All
+reports* list), an **Auto-refresh** toggle, a **Refresh every** interval, and a
+**🔄 Refresh now** button. The cadence is minute-scale by default (**1 min**,
+adjustable from 30s up to 30 min) — a live report doesn't need second-by-second
+polling, and **Refresh now** is always there when you want an instant update. A
+file caught mid-write (a test run rewriting it) is tolerated: the last good
+report stays on screen with a notice until the next successful read.
 
 **Live means in place.** The app reads the report straight from its file on
 disk — it never uploads or copies it. There's no browser upload in watch mode,
