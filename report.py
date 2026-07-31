@@ -34,6 +34,20 @@ def _scenario_failure(scenario: dict) -> dict:
     return failure if isinstance(failure, dict) else {}
 
 
+def scenario_example(scenario: dict) -> str:
+    """Readable label for a scenario-outline example (``""`` when not an outline).
+
+    A scenario outline runs the same steps once per Examples row; those runs
+    share a name and differ only by ``exampleParams``. Formatting the params
+    (e.g. ``separator=comma, food=2,5``) makes each example identifiable so a
+    passing row and a failing row of the same outline aren't confused.
+    """
+    params = scenario.get("exampleParams")
+    if not isinstance(params, dict) or not params:
+        return ""
+    return ", ".join(f"{key}={value}" for key, value in params.items())
+
+
 def flatten_scenarios(data: dict) -> list[dict]:
     """Flatten all scenarios into flat rows carrying their session context."""
     rows: list[dict] = []
@@ -44,6 +58,7 @@ def flatten_scenarios(data: dict) -> list[dict]:
                 "session": session.get("sessionNumber"),
                 "status": normalize_status(scn.get("status")),
                 "name": scn.get("name") or "(unnamed)",
+                "example": scenario_example(scn),
                 "feature": scn.get("featureFile") or "",
                 "durationMs": scn.get("durationMs") or 0,
                 "durationReadable": scn.get("durationReadable") or "—",
@@ -105,11 +120,43 @@ def error_signature(error: str | None) -> str:
     return re.sub(r"\s+", " ", first).strip()
 
 
+def _scenario_key(scenario: dict) -> tuple[Any, tuple | None]:
+    """Identity for matching a ``scenarios`` entry to its ``failedScenarios`` twin.
+
+    Different report producers have shipped different amounts of detail per
+    scenario over time, so a FAILED scenario doesn't always carry its own
+    ``failure`` object — sometimes the detail only exists in the session's
+    ``failedScenarios`` list. Matching by name alone would misattribute a
+    Scenario Outline row, so ``exampleParams`` (when present) is part of the key.
+    """
+    params = scenario.get("exampleParams")
+    key_params = tuple(sorted(params.items())) if isinstance(params, dict) else None
+    return (scenario.get("name"), key_params)
+
+
+def _failed_scenarios_lookup(session: dict) -> dict[tuple, dict]:
+    return {_scenario_key(fs): fs for fs in session.get("failedScenarios") or [] if fs}
+
+
+def _failure_detail(scenario: dict, fallback_lookup: dict[tuple, dict]) -> tuple[Any, Any]:
+    """``(step, error)`` for a failed scenario, falling back to its matching
+    ``failedScenarios`` entry when the scenario has no ``failure`` object."""
+    failure = _scenario_failure(scenario)
+    step, error = failure.get("step"), failure.get("error")
+    if not step and not error:
+        fallback = fallback_lookup.get(_scenario_key(scenario))
+        if fallback:
+            step, error = fallback.get("failedStep"), fallback.get("error")
+    return step, error
+
+
 def collect_failures(data: dict) -> list[dict]:
     """Every failed scenario across the report as flat, exportable rows.
 
-    Failures are read from each session's ``scenarios`` (status ``FAILED``);
-    a session that only carries ``failedScenarios`` falls back to those.
+    Failures are read from each session's ``scenarios`` (status ``FAILED``),
+    falling back to the matching ``failedScenarios`` entry (by name + example
+    params) when a scenario carries no ``failure`` object of its own. A session
+    that has no ``scenarios`` at all falls back to ``failedScenarios`` wholesale.
     """
     failures: list[dict] = []
     for session in data.get("sessions", []) or []:
@@ -120,21 +167,23 @@ def collect_failures(data: dict) -> list[dict]:
             if s and normalize_status(s.get("status")) == "FAILED"
         ]
         if failed_scn:
+            fallback_lookup = _failed_scenarios_lookup(session)
             for scn in failed_scn:
-                failure = _scenario_failure(scn)
-                failures.append(_failure_row(num, scn.get("name"), scn.get("featureFile"), failure.get("step"), failure.get("error")))
+                step, error = _failure_detail(scn, fallback_lookup)
+                failures.append(_failure_row(num, scn.get("name"), scn.get("featureFile"), scenario_example(scn), step, error))
         else:
             for fs in session.get("failedScenarios") or []:
                 if fs:
-                    failures.append(_failure_row(num, fs.get("name"), fs.get("featureFile"), fs.get("failedStep"), fs.get("error")))
+                    failures.append(_failure_row(num, fs.get("name"), fs.get("featureFile"), scenario_example(fs), fs.get("failedStep"), fs.get("error")))
     return failures
 
 
-def _failure_row(session: Any, name: Any, feature: Any, step: Any, error: Any) -> dict:
+def _failure_row(session: Any, name: Any, feature: Any, example: Any, step: Any, error: Any) -> dict:
     return {
         "session": session,
         "name": name or "(unnamed)",
         "feature": feature or "",
+        "example": example or "",
         "failedStep": step,
         "error": error,
         "signature": error_signature(error),
@@ -153,25 +202,75 @@ def cluster_failures(failures: Iterable[dict], by: str = "signature") -> list[di
     return clusters
 
 
-def find_flaky(data: dict) -> list[dict]:
-    """Scenarios (by name) that both passed and failed — likely flaky."""
-    stats: dict[str, dict] = defaultdict(lambda: {"passed": 0, "failed": 0, "feature": ""})
-    for _, scn in iter_scenarios(data):
-        rec = stats[scn.get("name") or "(unnamed)"]
-        status = normalize_status(scn.get("status"))
-        if status == "PASSED":
-            rec["passed"] += 1
-        elif status == "FAILED":
-            rec["failed"] += 1
-        if not rec["feature"]:
-            rec["feature"] = scn.get("featureFile") or ""
-    flaky = [
-        {"name": name, "passed": rec["passed"], "failed": rec["failed"], "feature": rec["feature"]}
-        for name, rec in stats.items()
-        if rec["passed"] > 0 and rec["failed"] > 0
+def _session_failed_steps(session: dict) -> list[tuple[str | None, dict]]:
+    """``(failed step, {name, example})`` for each failed scenario in a session.
+
+    Steps come from the scenarios' ``failure.step``, falling back per-scenario to
+    the matching ``failedScenarios`` entry when a scenario has no ``failure`` of
+    its own. A session with no ``scenarios`` at all falls back to ``failedScenarios``
+    wholesale.
+    """
+    failed = [
+        s
+        for s in session.get("scenarios") or []
+        if s and normalize_status(s.get("status")) == "FAILED"
     ]
-    flaky.sort(key=lambda r: r["failed"], reverse=True)
-    return flaky
+    if failed:
+        fallback_lookup = _failed_scenarios_lookup(session)
+        return [
+            (
+                _failure_detail(scn, fallback_lookup)[0],
+                {"name": scn.get("name") or "(unnamed)", "example": scenario_example(scn)},
+            )
+            for scn in failed
+        ]
+    return [
+        (
+            fs.get("failedStep"),
+            {"name": fs.get("name") or "(unnamed)", "example": scenario_example(fs)},
+        )
+        for fs in session.get("failedScenarios") or []
+        if fs
+    ]
+
+
+def find_flaky(data: dict) -> list[dict]:
+    """Per-session flaky steps — a step that failed while the session still passed.
+
+    A step is treated as flaky within a *single* session when it makes some
+    scenarios fail while that same session has passing scenarios: evidence the
+    step can work, so the failure is likely transient (a bad network, a slow
+    device) rather than a real defect. The report never records the steps of a
+    passed scenario, so "the step passed elsewhere" is approximated by the
+    session having any passing scenario. Flakiness is deliberately never inferred
+    across sessions — a fix landed between two runs would look identical to flake.
+
+    Each row is ``{session, step, failedCount, passedInSession, scenarios}`` where
+    ``scenarios`` lists the failing scenarios (name + example params), sorted
+    with the most-failed step first.
+    """
+    results: list[dict] = []
+    for session in data.get("sessions", []) or []:
+        scenarios = [s for s in session.get("scenarios") or [] if s]
+        passed = sum(1 for s in scenarios if normalize_status(s.get("status")) == "PASSED")
+        if passed == 0:
+            continue  # nothing passed → no evidence the step ever worked here
+        by_step: dict[str, list[dict]] = defaultdict(list)
+        for step, scn in _session_failed_steps(session):
+            if step:
+                by_step[step].append(scn)
+        for step, failed_scenarios in by_step.items():
+            results.append(
+                {
+                    "session": session.get("sessionNumber"),
+                    "step": step,
+                    "failedCount": len(failed_scenarios),
+                    "passedInSession": passed,
+                    "scenarios": failed_scenarios,
+                }
+            )
+    results.sort(key=lambda r: (r["failedCount"], r["passedInSession"]), reverse=True)
+    return results
 
 
 def feature_breakdown(data: dict) -> list[dict]:
@@ -207,6 +306,7 @@ def _matches_query(scenario: dict, query: str) -> bool:
         [
             scenario.get("name") or "",
             scenario.get("featureFile") or "",
+            scenario_example(scenario),
             _scenario_failure(scenario).get("error") or "",
         ]
     ).lower()
@@ -261,7 +361,7 @@ def filter_report(
     return out
 
 
-FAILURE_COLUMNS = ("session", "feature", "name", "failedStep", "signature", "error")
+FAILURE_COLUMNS = ("session", "feature", "name", "example", "failedStep", "signature", "error")
 
 
 def failures_to_csv(failures: Iterable[dict]) -> str:
@@ -284,11 +384,15 @@ def failures_to_markdown(failures: Iterable[dict]) -> str:
     failures = list(failures)
     if not failures:
         return "_No failures._"
-    lines = ["| Session | Feature | Scenario | Failed step | Error |", "|---|---|---|---|---|"]
+    lines = [
+        "| Session | Feature | Scenario | Example | Failed step | Error |",
+        "|---|---|---|---|---|---|",
+    ]
     for f in failures:
         lines.append(
             f"| {_md_cell(f.get('session'))} | {_md_cell(f.get('feature'))} | "
-            f"{_md_cell(f.get('name'))} | {_md_cell(f.get('failedStep'))} | {_md_cell(f.get('error'))} |"
+            f"{_md_cell(f.get('name'))} | {_md_cell(f.get('example'))} | "
+            f"{_md_cell(f.get('failedStep'))} | {_md_cell(f.get('error'))} |"
         )
     return "\n".join(lines)
 
@@ -310,8 +414,12 @@ def build_markdown_summary(data: dict) -> str:
 
     flaky = find_flaky(data)
     if flaky:
-        parts += ["", f"## Flaky scenarios ({len(flaky)})"]
-        parts += [f"- {r['name']} — {r['passed']}✓ / {r['failed']}✗" for r in flaky]
+        parts += ["", f"## Flaky steps ({len(flaky)})"]
+        parts += [
+            f"- Session {r['session']}: `{r['step']}` — failed {r['failedCount']}× "
+            f"({r['passedInSession']} scenario(s) passed in the session)"
+            for r in flaky
+        ]
 
     failures = collect_failures(data)
     if failures:

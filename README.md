@@ -4,7 +4,7 @@ A [Streamlit](https://streamlit.io/) app for triaging WDIO/Cucumber execution
 report JSON files (like `wdio-tests/reports/developer-executions/*.json`) in a
 clean, tabbed UI instead of scrolling through raw JSON. It's built to save time
 when you're working through passing and failing scenarios: it clusters similar
-errors, flags flaky tests, surfaces the slowest scenarios, and exports
+errors, flags flaky steps, surfaces the slowest scenarios, and exports
 ready-to-paste failure tables for bug reports.
 
 You upload the JSON from the UI — the app never fetches or reads files from
@@ -22,12 +22,19 @@ session.
   are normalized away so near-identical errors collapse together) or by
   **failed step**. Largest cluster first, with an example error per cluster.
   Export all failures as **CSV** or **Markdown**.
-- **Flaky tests** — scenarios that both passed *and* failed somewhere in the
-  report, so you can re-run them before filing a bug.
+- **Flaky tests** — flaky **steps**, detected **per session**: a step that
+  makes some scenarios fail while other scenarios in the *same* session pass —
+  evidence the step can work, so the failure is likely transient (network, a
+  slow device) rather than a real defect. Flakiness is never inferred across
+  sessions, since a fix landed between two runs would look identical to flake.
+- **Scenario-outline aware** — outline examples share a name and differ only by
+  their `exampleParams`, so the viewer shows those params everywhere scenarios
+  are listed. That lets you tell which example failed and which passed even when
+  the scenario names are identical.
 - **Sessions** — every session as a collapsible panel with per-session metrics,
   environment, failed steps, and a full scenario table. A **global filter bar**
   (status multiselect + feature-file multiselect + free-text search over
-  name/feature/error) narrows everything at once.
+  name/feature/example/error) narrows everything at once.
 
 ## Architecture at a glance
 
@@ -48,7 +55,11 @@ when extending it.
 
 1. **Upload** — `main()` renders a sidebar file uploader. Nothing is shown
    until a JSON file is uploaded; invalid JSON is caught and shown as an error
-   instead of crashing the app.
+   instead of crashing the app. Once parsed, the report is kept in a small
+   server-side cache keyed by an id stored in the page's URL query string
+   (`?rid=...`), so **reloading the browser tab keeps the report showing**
+   instead of prompting for another upload. A **"Clear report"** button in the
+   sidebar drops it and returns to the upload prompt.
 2. **Parse** — the uploaded file is `json.load()`-ed into a plain dict. The
    expected shape is:
    ```jsonc
@@ -66,6 +77,7 @@ when extending it.
          "scenarios": [
            {
              "name": "...", "featureFile": "...", "status": "FAILED",
+             "exampleParams": { "...": "..." },
              "startTime": "...", "endTime": "...",
              "durationReadable": "...", "durationMs": 1234,
              "failure": { "step": "...", "error": "...", "location": "..." }
@@ -80,14 +92,17 @@ when extending it.
    ```
    The viewer is defensive: sessions that only carry `failedScenarios` (no
    per-scenario `failure` objects) still work, missing fields fall back to
-   sensible defaults, and `durationMs` is optional (the slowest-scenarios view
-   simply skips scenarios without it).
+   sensible defaults, `exampleParams` is only present for scenario outlines, and
+   `durationMs` is optional (the slowest-scenarios view simply skips scenarios
+   without it).
 3. **Render** — `render_report()` renders the top-level metrics and then four
    tabs (Overview / Failure triage / Flaky tests / Sessions), each backed by a
    pure function from `report.py`.
 
-Everything is a pure function of the uploaded dict — there's no server-side
-state, database, or file persistence involved.
+Rendering is a pure function of the parsed dict — there's no database. The
+only server-side state is the small `{id: report}` cache used purely to
+survive a browser reload; it's cleared when the process restarts or via the
+sidebar's "Clear report" button.
 
 ## Run with Docker
 
@@ -129,9 +144,10 @@ streamlit run app.py
 2. In the sidebar, upload a report JSON (one file at a time).
 3. Start on **Overview** for the health of the run, jump to **Failure triage**
    to see clustered failures (group by error signature or failed step, then
-   export CSV/Markdown), check **Flaky tests** for scenarios that both passed
-   and failed, and use **Sessions** with the filter bar to drill into specific
-   statuses, features, or a text search across name/feature/error.
+   export CSV/Markdown), check **Flaky tests** for steps that failed in a
+   session that also had passing scenarios, and use **Sessions** with the filter
+   bar to drill into specific statuses, features, or a text search across
+   name/feature/example/error.
 
 ## Testing
 

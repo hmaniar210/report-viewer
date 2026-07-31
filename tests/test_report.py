@@ -95,7 +95,7 @@ def test_collect_failures_count_matches_failed_totals(data):
     expected = sum(s.get("failed", 0) for s in data["sessions"])
     assert len(failures) == expected
     for f in failures:
-        assert set(f) >= {"session", "name", "feature", "failedStep", "error", "signature"}
+        assert set(f) >= {"session", "name", "feature", "example", "failedStep", "error", "signature"}
 
 
 def test_cluster_failures_groups_and_sorts():
@@ -119,30 +119,174 @@ def test_cluster_failures_total_is_preserved(data):
     assert sum(c["count"] for c in clusters) == len(failures)
 
 
-# --- find_flaky --------------------------------------------------------------
+# --- collect_failures: mixed per-scenario detail / failedScenarios fallback --
 
 
-def test_find_flaky_detects_pass_and_fail_of_same_name():
+def test_collect_failures_falls_back_per_scenario_when_failure_object_missing():
+    """A FAILED scenario with no ``failure`` object should pull its step/error
+    from the matching ``failedScenarios`` entry (matched by name + example),
+    even when other scenarios in the same session DO carry their own ``failure``."""
     data = {
         "sessions": [
             {
+                "sessionNumber": 1,
                 "scenarios": [
-                    {"name": "S", "status": "PASSED", "featureFile": "f"},
-                    {"name": "S", "status": "FAILED", "featureFile": "f"},
-                    {"name": "T", "status": "PASSED", "featureFile": "f"},
-                ]
+                    {
+                        "name": "A",
+                        "status": "FAILED",
+                        "failure": {"step": "step-a", "error": "error-a"},
+                    },
+                    {"name": "B", "status": "FAILED"},  # no failure object at all
+                ],
+                "failedScenarios": [
+                    {"name": "B", "failedStep": "step-b", "error": "error-b"},
+                ],
+            }
+        ]
+    }
+    failures = {f["name"]: f for f in rp.collect_failures(data)}
+    assert failures["A"]["failedStep"] == "step-a" and failures["A"]["error"] == "error-a"
+    assert failures["B"]["failedStep"] == "step-b" and failures["B"]["error"] == "error-b"
+
+
+def test_collect_failures_fallback_matches_by_example_params_not_name_alone():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "Outline", "status": "FAILED", "exampleParams": {"region": "US"}},
+                    {"name": "Outline", "status": "FAILED", "exampleParams": {"region": "EU"}},
+                ],
+                "failedScenarios": [
+                    {"name": "Outline", "exampleParams": {"region": "US"}, "failedStep": "us-step", "error": "us-error"},
+                    {"name": "Outline", "exampleParams": {"region": "EU"}, "failedStep": "eu-step", "error": "eu-error"},
+                ],
+            }
+        ]
+    }
+    failures = rp.collect_failures(data)
+    by_example = {f["example"]: f for f in failures}
+    assert by_example["region=US"]["failedStep"] == "us-step"
+    assert by_example["region=EU"]["failedStep"] == "eu-step"
+
+
+def test_find_flaky_uses_per_scenario_fallback_too():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "A", "status": "PASSED"},
+                    {"name": "B", "status": "FAILED"},  # no failure object
+                ],
+                "failedScenarios": [{"name": "B", "failedStep": "shared-step", "error": "e"}],
             }
         ]
     }
     flaky = rp.find_flaky(data)
     assert len(flaky) == 1
-    assert flaky[0]["name"] == "S"
-    assert flaky[0]["passed"] == 1 and flaky[0]["failed"] == 1
+    assert flaky[0]["step"] == "shared-step"
 
 
-def test_find_flaky_on_fixture_returns_only_mixed(data):
-    for row in rp.find_flaky(data):
-        assert row["passed"] > 0 and row["failed"] > 0
+# --- scenario_example --------------------------------------------------------
+
+
+def test_scenario_example_formats_params():
+    scn = {"exampleParams": {"separator": "comma", "food": "2,5"}}
+    assert rp.scenario_example(scn) == "separator=comma, food=2,5"
+
+
+@pytest.mark.parametrize("scn", [{}, {"exampleParams": None}, {"exampleParams": {}}])
+def test_scenario_example_empty_when_not_outline(scn):
+    assert rp.scenario_example(scn) == ""
+
+
+# --- find_flaky (per-session, step-level) ------------------------------------
+
+
+def test_find_flaky_flags_step_when_session_has_passes():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "A", "status": "PASSED"},
+                    {"name": "B", "status": "FAILED", "failure": {"step": "user logged in"}},
+                    {"name": "C", "status": "FAILED", "failure": {"step": "user logged in"}},
+                ],
+            }
+        ]
+    }
+    flaky = rp.find_flaky(data)
+    assert len(flaky) == 1
+    row = flaky[0]
+    assert row["session"] == 1
+    assert row["step"] == "user logged in"
+    assert row["failedCount"] == 2
+    assert row["passedInSession"] == 1
+    assert {s["name"] for s in row["scenarios"]} == {"B", "C"}
+
+
+def test_find_flaky_ignores_session_without_passes():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "B", "status": "FAILED", "failure": {"step": "user logged in"}},
+                    {"name": "C", "status": "FAILED", "failure": {"step": "user logged in"}},
+                ],
+            }
+        ]
+    }
+    assert rp.find_flaky(data) == []
+
+
+def test_find_flaky_is_per_session_not_cross_session():
+    # A step failing in one session but only passing in another is NOT flaky:
+    # a fix landed between the two runs must not look like flake.
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [{"name": "B", "status": "FAILED", "failure": {"step": "connect"}}],
+            },
+            {"sessionNumber": 2, "scenarios": [{"name": "B", "status": "PASSED"}]},
+        ]
+    }
+    assert rp.find_flaky(data) == []
+
+
+def test_find_flaky_separates_outline_examples():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "Bolus", "status": "PASSED", "exampleParams": {"sep": "period"}},
+                    {
+                        "name": "Bolus",
+                        "status": "FAILED",
+                        "exampleParams": {"sep": "comma"},
+                        "failure": {"step": "enter value"},
+                    },
+                ],
+            }
+        ]
+    }
+    flaky = rp.find_flaky(data)
+    assert len(flaky) == 1
+    assert flaky[0]["scenarios"] == [{"name": "Bolus", "example": "sep=comma"}]
+
+
+def test_find_flaky_on_fixture_is_per_session_and_shaped(data):
+    rows = rp.find_flaky(data)
+    assert rows  # fixture sessions 4/5/6 have passes alongside failed steps
+    for row in rows:
+        assert row["step"]
+        assert row["failedCount"] >= 1
+        assert row["passedInSession"] >= 1
 
 
 # --- feature_breakdown / slowest --------------------------------------------
@@ -185,6 +329,24 @@ def test_filter_report_no_filters_is_noop_shaped(data):
     assert len(view["sessions"]) == len(data["sessions"])
 
 
+def test_filter_report_query_matches_example_params():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "Outline", "status": "PASSED", "exampleParams": {"region": "US"}},
+                    {"name": "Outline", "status": "PASSED", "exampleParams": {"region": "EU"}},
+                ],
+            }
+        ]
+    }
+    view = rp.filter_report(data, query="region=eu")
+    matched = rp.flatten_scenarios(view)
+    assert len(matched) == 1
+    assert matched[0]["example"] == "region=EU"
+
+
 # --- exports -----------------------------------------------------------------
 
 
@@ -194,7 +356,7 @@ def test_failures_to_csv_has_header_and_rows(data):
 
     failures = rp.collect_failures(data)
     csv_text = rp.failures_to_csv(failures)
-    assert csv_text.splitlines()[0].startswith("session,feature,name")
+    assert csv_text.splitlines()[0] == "session,feature,name,example,failedStep,signature,error"
     # Errors embed newlines, so parse properly rather than counting text lines.
     rows = list(csv.DictReader(io.StringIO(csv_text)))
     assert len(rows) == len(failures)
