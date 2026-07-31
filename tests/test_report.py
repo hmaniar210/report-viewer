@@ -305,7 +305,79 @@ def test_slowest_scenarios_is_sorted_desc_and_limited(data):
     assert durations == sorted(durations, reverse=True)
 
 
+# --- day parsing / grouping --------------------------------------------------
+
+
+def test_parse_timestamp_reads_pm_and_midnight_am():
+    afternoon = rp.parse_timestamp("29 Jul 2026, 07:14:05 pm")
+    assert (afternoon.year, afternoon.month, afternoon.day, afternoon.hour) == (2026, 7, 29, 19)
+    # Reports ship a broken midnight spelling ("00:.. am") that 12-hour %I rejects;
+    # it must still parse (via the %H fallback) rather than being dropped.
+    midnight = rp.parse_timestamp("30 Jul 2026, 00:28:04 am")
+    assert (midnight.day, midnight.hour, midnight.minute) == (30, 0, 28)
+
+
+@pytest.mark.parametrize("value", [None, "", "not a date", 123])
+def test_parse_timestamp_returns_none_when_unparseable(value):
+    assert rp.parse_timestamp(value) is None
+
+
+def test_day_label_normalizes_padding_so_a_day_groups_once():
+    # A parseable time and an unparseable one on the same single-digit day must
+    # collapse to one normalized label, not two ("1 Jul 2026" vs "01 Jul 2026").
+    assert rp.day_label("1 Jul 2026, 07:14:05 pm") == "01 Jul 2026"
+    assert rp.day_label("1 Jul 2026, 25:99 xx") == "01 Jul 2026"
+    assert rp.day_label(None) == ""
+
+
+def test_available_days_are_distinct_and_chronological(data):
+    days = rp.available_days(data)
+    assert days == ["29 Jul 2026", "30 Jul 2026"]
+
+
+def test_available_days_falls_back_to_session_start_time():
+    data = {"sessions": [{"sessionNumber": 1, "startTime": "05 Jan 2026, 09:00:00 am", "scenarios": []}]}
+    assert rp.available_days(data) == ["05 Jan 2026"]
+
+
+def test_flatten_scenarios_includes_day(data):
+    rows = rp.flatten_scenarios(data)
+    assert rows
+    assert all(r["day"] in {"29 Jul 2026", "30 Jul 2026"} for r in rows)
+
+
+def test_day_breakdown_totals_match_scenarios(data):
+    total = sum(r["total"] for r in rp.day_breakdown(data))
+    assert total == len(rp.flatten_scenarios(data))
+
+
+def test_day_breakdown_is_chronological_and_shaped(data):
+    breakdown = rp.day_breakdown(data)
+    assert [r["day"] for r in breakdown] == ["29 Jul 2026", "30 Jul 2026"]
+    for r in breakdown:
+        assert r["total"] == r["passed"] + r["failed"] + r["skipped"]
+        assert 0.0 <= r["passRate"] <= 100.0
+
+
+def test_day_breakdown_buckets_undatable_scenarios_as_unknown():
+    data = {
+        "sessions": [
+            {"sessionNumber": 1, "scenarios": [{"name": "A", "status": "PASSED"}]}
+        ]
+    }
+    breakdown = rp.day_breakdown(data)
+    assert [r["day"] for r in breakdown] == ["(unknown)"]
+    assert breakdown[0]["passed"] == 1
+
+
 # --- filter_report -----------------------------------------------------------
+
+
+def test_filter_report_by_day_keeps_only_that_day(data):
+    view = rp.filter_report(data, days=["29 Jul 2026"])
+    rows = rp.flatten_scenarios(view)
+    assert rows  # the fixture has scenarios on 29 Jul
+    assert all(r["day"] == "29 Jul 2026" for r in rows)
 
 
 def test_filter_report_by_status_keeps_only_failed(data):
@@ -360,6 +432,31 @@ def test_failures_to_csv_has_header_and_rows(data):
     # Errors embed newlines, so parse properly rather than counting text lines.
     rows = list(csv.DictReader(io.StringIO(csv_text)))
     assert len(rows) == len(failures)
+
+
+def test_scenarios_to_csv_has_header_and_day_column(data):
+    import csv
+    import io
+
+    rows = rp.flatten_scenarios(data)
+    csv_text = rp.scenarios_to_csv(rows)
+    header = csv_text.splitlines()[0]
+    assert header == "session,day,status,feature,name,example,start,durationReadable,failedStep,error"
+    parsed = list(csv.DictReader(io.StringIO(csv_text)))
+    assert len(parsed) == len(rows)
+    assert all(r["day"] in {"29 Jul 2026", "30 Jul 2026"} for r in parsed)
+
+
+def test_day_breakdown_to_csv_rounds_pass_rate():
+    import csv
+    import io
+
+    rows = [{"day": "01 Jan 2026", "total": 3, "passed": 1, "failed": 2, "skipped": 0, "passRate": 33.3333}]
+    csv_text = rp.day_breakdown_to_csv(rows)
+    assert csv_text.splitlines()[0] == "day,total,passed,failed,skipped,passRate"
+    parsed = list(csv.DictReader(io.StringIO(csv_text)))
+    assert parsed[0]["passRate"] == "33.3"
+    assert parsed[0]["passed"] == "1" and parsed[0]["skipped"] == "0"
 
 
 def test_failures_to_markdown_escapes_pipes():

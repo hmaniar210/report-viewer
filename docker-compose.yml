@@ -4,3 +4,13 @@ services:
     ports:
       - "8501:8501"
     restart: unless-stopped
+    # Watch mode: the app reads report JSONs from the mounted folder and
+    # auto-refreshes as they change — reading each file live, in place, with no
+    # copying. The quickstart script points these at the file or folder you give
+    # it; by hand, set REPORTS_HOST_DIR (host folder to mount) and, to track a
+    # single file, REPORT_FILE_IN_CONTAINER=/data/<name>. Mounted read-only.
+    environment:
+      - REPORT_DIR=/data
+      - REPORT_FILE=${REPORT_FILE_IN_CONTAINER:-}
+    volumes:
+      - ${REPORTS_HOST_DIR:-./reports}:/data:ro

@@ -1,0 +1,5 @@
+# Drop or update WDIO report JSON files here.
+# In watch mode (docker-compose sets REPORT_DIR=/data mounted from this folder,
+# or run locally with `REPORT_DIR=./reports streamlit run app.py`) the viewer
+# reads the newest *.json here and auto-refreshes as it changes.
+# Real reports are git-ignored (*.json); this .gitkeep just keeps the folder.

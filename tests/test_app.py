@@ -3,6 +3,7 @@ report (tests/fixtures/sample_report.json) and assert it renders without
 raising. Pure data logic is covered separately in test_report.py.
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,17 @@ def _render_script(data):
     _app.render_report(data)
 
 
+def _render_live_script(source, seed):
+    from pathlib import Path as _Path
+
+    import streamlit as st
+
+    import app as _app
+
+    st.session_state.setdefault(_app._LAST_GOOD_KEY, seed)
+    _app._render_live(_Path(source))
+
+
 def test_render_report_runs_without_exception(report_data):
     """Runs the real app.render_report() inside a simulated Streamlit script
     and asserts no uncaught exception was raised while rendering the fixture."""
@@ -58,12 +70,12 @@ def test_overview_tab_shows_overall_totals(report_data):
     assert overview.get("Skipped") == str(summary["skipped"])
 
 
-def test_report_renders_four_tabs(report_data):
+def test_report_renders_five_tabs(report_data):
     at = AppTest.from_function(_render_script, kwargs={"data": report_data})
     at.run(timeout=30)
 
     assert not at.exception
-    assert len(at.tabs) == 4
+    assert len(at.tabs) == 5
 
 
 def test_main_shows_upload_prompt_when_no_file():
@@ -287,4 +299,136 @@ def test_render_report_runs_without_exception_for_test_json():
     at = AppTest.from_function(_render_script, kwargs={"data": data})
     at.run(timeout=30)
     assert not at.exception
+
+
+# --- live / watch mode -------------------------------------------------------
+
+APP_PATH = str(Path(__file__).parent.parent / "app.py")
+
+
+def test_watch_env_parsing(monkeypatch, tmp_path):
+    monkeypatch.delenv("REPORT_FILE", raising=False)
+    monkeypatch.delenv("REPORT_DIR", raising=False)
+    assert app._watch_file() is None
+    assert app._watch_dir() is None
+
+    report = tmp_path / "r.json"
+    report.write_text("{}")
+    monkeypatch.setenv("REPORT_FILE", str(report))
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    assert app._watch_file() == report
+    assert app._watch_dir() == tmp_path
+
+    # A REPORT_DIR that isn't a directory is ignored rather than trusted.
+    monkeypatch.setenv("REPORT_DIR", str(report))
+    assert app._watch_dir() is None
+
+
+def test_list_reports_orders_newest_first(tmp_path):
+    old = tmp_path / "old.json"
+    old.write_text("{}")
+    new = tmp_path / "new.json"
+    new.write_text("{}")
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+    assert [p.name for p in app._list_reports(tmp_path)] == ["new.json", "old.json"]
+
+
+def test_load_report_file_reads_json_and_raises_on_garbage(tmp_path):
+    good = tmp_path / "good.json"
+    good.write_text('{"developer": "d", "sessions": []}')
+    assert app._load_report_file(good)["developer"] == "d"
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        app._load_report_file(bad)
+
+
+def test_watch_mode_waits_when_folder_empty(monkeypatch, tmp_path):
+    monkeypatch.delenv("REPORT_FILE", raising=False)
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any("Waiting for a report" in i.value for i in at.info)
+
+
+def test_watch_mode_renders_newest_report(monkeypatch, tmp_path, report_data):
+    (tmp_path / "report.json").write_text(json.dumps(report_data))
+    monkeypatch.delenv("REPORT_FILE", raising=False)
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any(t.value == "WDIO Test Report" for t in at.title)
+
+
+def test_watch_mode_tracks_a_single_file(monkeypatch, tmp_path, report_data):
+    """Giving one file (REPORT_FILE) tracks that exact file live — no folder
+    picker, just the report and a live 'Tracking …' note."""
+    exec_file = tmp_path / "exec.json"
+    exec_file.write_text(json.dumps(report_data))
+    monkeypatch.setenv("REPORT_FILE", str(exec_file))
+    monkeypatch.delenv("REPORT_DIR", raising=False)
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any(t.value == "WDIO Test Report" for t in at.title)
+    assert not any(s.label == "File to track" for s in at.selectbox)  # no folder UI
+    assert any("exec.json" in c.value for c in at.caption)
+
+
+def test_watch_mode_single_file_wins_when_dir_also_set(monkeypatch, tmp_path, report_data):
+    """docker-compose sets REPORT_DIR=/data always; when REPORT_FILE is also set
+    (single-file mode), the fixed file must win and the folder picker stay hidden."""
+    exec_file = tmp_path / "exec.json"
+    exec_file.write_text(json.dumps(report_data))
+    (tmp_path / "other.json").write_text(json.dumps({"developer": "d", "sessions": []}))
+    monkeypatch.setenv("REPORT_FILE", str(exec_file))
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert not any(s.label == "File to track" for s in at.selectbox)
+    assert any("exec.json" in c.value for c in at.caption)
+
+
+def test_watch_mode_shows_refresh_and_file_controls(monkeypatch, tmp_path, report_data):
+    """The file picker and every refresh control must be visible in watch mode,
+    alongside the rendered report — read live from disk, nothing uploaded."""
+    (tmp_path / "report.json").write_text(json.dumps(report_data))
+    monkeypatch.delenv("REPORT_FILE", raising=False)
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path))
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any(t.label == "Auto-refresh" for t in at.toggle)
+    assert any(s.label == "File to track" for s in at.selectbox)
+    assert any(s.label == "Refresh every" for s in at.select_slider)
+    assert any("Refresh now" in b.label for b in at.button)
+    # …and the report itself still renders alongside them.
+    assert any(t.value == "WDIO Test Report" for t in at.title)
+
+
+def test_render_live_tolerates_mid_write_json(tmp_path, report_data):
+    """A half-written file (invalid JSON) must not crash the render — the last
+    good report is shown and a stale note surfaces instead."""
+    half = tmp_path / "report.json"
+    half.write_text("{not valid yet")
+
+    at = AppTest.from_function(
+        _render_live_script, kwargs={"source": str(half), "seed": report_data}
+    )
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any(t.value == "WDIO Test Report" for t in at.title)
+    assert any("last good data" in c.value for c in at.caption)
+
 
