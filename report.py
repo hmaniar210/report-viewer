@@ -11,6 +11,7 @@ import csv
 import io
 import re
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, Iterable, Iterator
 
 VALID_STATUSES = ("PASSED", "FAILED", "SKIPPED")
@@ -48,6 +49,70 @@ def scenario_example(scenario: dict) -> str:
     return ", ".join(f"{key}={value}" for key, value in params.items())
 
 
+_TIMESTAMP_FORMATS = (
+    # ``%I`` (12-hour) is tried first so ``07:14:05 pm`` reads as 19:xx. Reports
+    # have also shipped a broken midnight spelling (``00:28:04 am``) that ``%I``
+    # rejects, so ``%H`` (24-hour) is tried next to recover those. A bare date is
+    # the last resort so a normalized day label can still be parsed for sorting.
+    "%d %b %Y, %I:%M:%S %p",
+    "%d %b %Y, %H:%M:%S %p",
+    "%d %b %Y, %I:%M %p",
+    "%d %b %Y, %H:%M %p",
+    "%d %b %Y",
+)
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """Parse a report timestamp like ``"29 Jul 2026, 07:14:05 pm"`` to a datetime.
+
+    Several formats are tried because reports have shipped slightly different
+    timestamp shapes over time (including a midnight ``00:..`` spelling that the
+    12-hour ``%I`` code rejects). ``None`` is returned when nothing matches so
+    callers stay defensive rather than assuming a parse always succeeds.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def day_label(value: Any) -> str:
+    """Calendar-day label (e.g. ``"29 Jul 2026"``) for a report timestamp.
+
+    Labels are normalized to a single ``"%d %b %Y"`` spelling so the same day
+    always groups together regardless of zero-padding differences in the source.
+    When the full timestamp can't be parsed the date portion (before the first
+    comma) is parsed instead, falling back to that raw text, then to ``""``.
+    """
+    parsed = parse_timestamp(value)
+    if parsed:
+        return parsed.strftime("%d %b %Y")
+    if isinstance(value, str) and value.strip():
+        date_part = value.split(",")[0].strip()
+        parsed_date = parse_timestamp(date_part)
+        return parsed_date.strftime("%d %b %Y") if parsed_date else date_part
+    return ""
+
+
+def _day_sort_key(label: str) -> datetime:
+    """Chronological sort key for a day label; unparseable labels sort last."""
+    return parse_timestamp(label) or datetime.max
+
+
+def _scenario_day(session: dict, scenario: dict) -> str:
+    """Calendar-day label for a scenario, falling back to its session.
+
+    Scenarios carry their own ``startTime``; when one is missing the session's
+    ``startTime`` is used so the scenario still lands on a day.
+    """
+    return day_label(scenario.get("startTime") or session.get("startTime"))
+
+
 def flatten_scenarios(data: dict) -> list[dict]:
     """Flatten all scenarios into flat rows carrying their session context."""
     rows: list[dict] = []
@@ -56,6 +121,7 @@ def flatten_scenarios(data: dict) -> list[dict]:
         rows.append(
             {
                 "session": session.get("sessionNumber"),
+                "day": _scenario_day(session, scn),
                 "status": normalize_status(scn.get("status")),
                 "name": scn.get("name") or "(unnamed)",
                 "example": scenario_example(scn),
@@ -294,6 +360,55 @@ def feature_breakdown(data: dict) -> list[dict]:
     return rows
 
 
+def available_days(data: dict) -> list[str]:
+    """Distinct calendar days present in the report, chronologically sorted.
+
+    Scenario start times drive the list, falling back to a session's start time
+    (via :func:`_scenario_day`) so a session with no scenario-level timestamps
+    still contributes its day. Undatable scenarios contribute nothing.
+    """
+    days: set[str] = set()
+    for session in data.get("sessions", []) or []:
+        scenarios = [s for s in session.get("scenarios") or [] if s] or [{}]
+        for scn in scenarios:
+            label = _scenario_day(session, scn)
+            if label:
+                days.add(label)
+    return sorted(days, key=_day_sort_key)
+
+
+def day_breakdown(data: dict) -> list[dict]:
+    """Passed/failed/skipped counts and pass rate per calendar day.
+
+    Mirrors :func:`feature_breakdown` but groups by the scenario's day (see
+    :func:`_scenario_day`). Only scenarios with a recognized status are counted;
+    scenarios whose day can't be determined fall into an ``"(unknown)"`` bucket.
+    Rows come back oldest day first.
+    """
+    stats: dict[str, dict] = defaultdict(lambda: {"passed": 0, "failed": 0, "skipped": 0})
+    for session in data.get("sessions", []) or []:
+        for scn in session.get("scenarios") or []:
+            if not scn:
+                continue
+            status = normalize_status(scn.get("status"))
+            if status not in VALID_STATUSES:
+                continue
+            stats[_scenario_day(session, scn) or "(unknown)"][status.lower()] += 1
+    rows = []
+    for day in sorted(stats, key=_day_sort_key):
+        rec = stats[day]
+        total = rec["passed"] + rec["failed"] + rec["skipped"]
+        rows.append(
+            {
+                "day": day,
+                "total": total,
+                **rec,
+                "passRate": (rec["passed"] / total * 100) if total else 0.0,
+            }
+        )
+    return rows
+
+
 def slowest_scenarios(data: dict, limit: int = 10) -> list[dict]:
     """The ``limit`` scenarios with the longest ``durationMs``."""
     rows = [r for r in flatten_scenarios(data) if r["durationMs"]]
@@ -319,6 +434,7 @@ def filter_report(
     statuses: Iterable[str] | None = None,
     features: Iterable[str] | None = None,
     sessions: Iterable[Any] | None = None,
+    days: Iterable[str] | None = None,
     query: str | None = None,
 ) -> dict:
     """Return a copy of ``data`` keeping only scenarios matching the filters.
@@ -329,6 +445,7 @@ def filter_report(
     status_set = {normalize_status(s) for s in statuses} if statuses else None
     feature_set = set(features) if features else None
     session_set = set(sessions) if sessions else None
+    day_set = set(days) if days else None
     q = (query or "").strip().lower()
 
     out_sessions = []
@@ -342,6 +459,8 @@ def filter_report(
             if status_set is not None and normalize_status(scn.get("status")) not in status_set:
                 continue
             if feature_set is not None and (scn.get("featureFile") or "") not in feature_set:
+                continue
+            if day_set is not None and _scenario_day(session, scn) not in day_set:
                 continue
             if q and not _matches_query(scn, q):
                 continue
@@ -371,6 +490,64 @@ def failures_to_csv(failures: Iterable[dict]) -> str:
     writer.writeheader()
     for failure in failures:
         writer.writerow({column: (failure.get(column) or "") for column in FAILURE_COLUMNS})
+    return buffer.getvalue()
+
+
+SCENARIO_COLUMNS = (
+    "session",
+    "day",
+    "status",
+    "feature",
+    "name",
+    "example",
+    "start",
+    "durationReadable",
+    "failedStep",
+    "error",
+)
+
+
+def scenarios_to_csv(rows: Iterable[dict]) -> str:
+    """Flattened scenario rows as CSV text, ready for ``st.download_button``.
+
+    Accepts the output of :func:`flatten_scenarios` (optionally already narrowed
+    to one or more days via :func:`filter_report`) so the exact rows on screen
+    are what get exported.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=SCENARIO_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(
+            {column: ("" if row.get(column) is None else row.get(column)) for column in SCENARIO_COLUMNS}
+        )
+    return buffer.getvalue()
+
+
+DAY_COLUMNS = ("day", "total", "passed", "failed", "skipped", "passRate")
+
+
+def day_breakdown_to_csv(rows: Iterable[dict]) -> str:
+    """Per-day breakdown rows (:func:`day_breakdown`) as CSV text.
+
+    ``passRate`` is written rounded to one decimal place so the export matches
+    what the UI shows.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=DAY_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        rate = row.get("passRate")
+        writer.writerow(
+            {
+                column: (
+                    round(rate, 1)
+                    if column == "passRate" and isinstance(rate, (int, float))
+                    else ("" if row.get(column) is None else row.get(column))
+                )
+                for column in DAY_COLUMNS
+            }
+        )
     return buffer.getvalue()
 
 

@@ -73,9 +73,12 @@ Keep the two-layer split intact (see
 
 ## Data handling & privacy
 
-- The app is **in-memory only** — it reads the uploaded file for the session
-  and never writes reports to disk or a database. Keep it that way; don't add
-  server-side persistence without a deliberate reason.
+- The app is **read-only and in-memory** — it only ever *reads* reports, never
+  writes them to disk or a database. In the default upload mode it holds the
+  uploaded file in memory for the session. In opt-in **watch mode**
+  (`REPORT_DIR`/`REPORT_FILE`, operator-set env vars only — never a path from the
+  web UI) it reads the watched file/folder live, in place, without copying.
+  Keep it that way: env-set paths only, and no writing reports to disk.
 - **Don't commit real reports.** [`.gitignore`](../.gitignore) ignores `*.json`
   except the test fixture (`!tests/fixtures/*.json`). The committed fixture
   should stay anonymized. When updating it, keep its internal counts consistent
