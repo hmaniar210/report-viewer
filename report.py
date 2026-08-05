@@ -166,6 +166,55 @@ def per_session_counts(data: dict) -> list[dict]:
     ]
 
 
+def _non_negative_int(value: Any) -> int | None:
+    """Best-effort non-negative int coercion (``None`` when absent/invalid)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def session_scenario_progress(session: dict) -> dict | None:
+    """Current session progress inferred from scenarioIndex/scenariosLeft.
+
+    Producers can annotate scenario rows with ``scenarioIndex`` (which scenario
+    number has been reached) and ``scenariosLeft`` (how many are still pending).
+    This helper returns the most advanced row in a session so the UI can show a
+    clear "currently at scenario X, Y left" status while the run is in progress.
+    """
+    best_index: int | None = None
+    best_left: int | None = None
+    for scenario in session.get("scenarios") or []:
+        if not scenario:
+            continue
+        index = _non_negative_int(scenario.get("scenarioIndex"))
+        left = _non_negative_int(scenario.get("scenariosLeft"))
+        if index is None and left is None:
+            continue
+        if (
+            best_index is None
+            or (index is not None and index > best_index)
+            or (index == best_index and left is not None and (best_left is None or left < best_left))
+        ):
+            best_index = index
+            best_left = left
+
+    if best_index is None and best_left is None:
+        return None
+
+    total = best_index + best_left if best_index is not None and best_left is not None else None
+    return {
+        "scenarioIndex": best_index,
+        "scenariosLeft": best_left,
+        "totalScenarios": total,
+    }
+
+
 _HEX = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{20,}\b|0x[0-9a-fA-F]+")
 _QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
 _NUM = re.compile(r"\d+")

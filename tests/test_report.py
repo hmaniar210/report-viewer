@@ -305,6 +305,39 @@ def test_slowest_scenarios_is_sorted_desc_and_limited(data):
     assert durations == sorted(durations, reverse=True)
 
 
+# --- session progress from scenarioIndex/scenariosLeft ----------------------
+
+
+def test_session_scenario_progress_picks_latest_index_and_left():
+    session = {
+        "scenarios": [
+            {"name": "A", "scenarioIndex": 39, "scenariosLeft": 27},
+            {"name": "B", "scenarioIndex": 40, "scenariosLeft": 26},
+        ]
+    }
+    progress = rp.session_scenario_progress(session)
+    assert progress == {"scenarioIndex": 40, "scenariosLeft": 26, "totalScenarios": 66}
+
+
+def test_session_scenario_progress_accepts_numeric_strings_and_ignores_invalid():
+    session = {
+        "scenarios": [
+            {"scenarioIndex": "x", "scenariosLeft": "y"},
+            {"scenarioIndex": "40", "scenariosLeft": "26"},
+        ]
+    }
+    assert rp.session_scenario_progress(session) == {
+        "scenarioIndex": 40,
+        "scenariosLeft": 26,
+        "totalScenarios": 66,
+    }
+
+
+def test_session_scenario_progress_returns_none_when_missing_everywhere():
+    session = {"scenarios": [{"name": "A"}, {"name": "B"}]}
+    assert rp.session_scenario_progress(session) is None
+
+
 # --- day parsing / grouping --------------------------------------------------
 
 

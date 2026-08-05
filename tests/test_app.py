@@ -221,6 +221,47 @@ def outline_data() -> dict:
     }
 
 
+@pytest.fixture
+def running_progress_data() -> dict:
+    return {
+        "developer": "test-dev",
+        "totalSessions": 1,
+        "sessions": [
+            {
+                "sessionNumber": 7,
+                "status": "in-progress",
+                "scenarioCount": 2,
+                "passed": 1,
+                "failed": 1,
+                "skipped": 0,
+                "scenarios": [
+                    {
+                        "name": "Scenario 39",
+                        "featureFile": "f.feature",
+                        "status": "PASSED",
+                        "scenarioIndex": 39,
+                        "scenariosLeft": 27,
+                    },
+                    {
+                        "name": "Scenario 40",
+                        "featureFile": "f.feature",
+                        "status": "FAILED",
+                        "scenarioIndex": 40,
+                        "scenariosLeft": 26,
+                    },
+                ],
+                "failedScenarios": [
+                    {
+                        "name": "Scenario 40",
+                        "failedStep": "step",
+                        "error": "boom",
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def test_render_report_runs_without_exception_for_outline_data(outline_data):
     at = AppTest.from_function(_render_script, kwargs={"data": outline_data})
     at.run(timeout=30)
@@ -282,6 +323,15 @@ def test_legacy_failure_scenarios_fallback_renders_step_and_error(outline_data):
     legacy = next(f for f in failures if f["name"] == "Legacy failure")
     assert legacy["failedStep"] == "legacy step"
     assert legacy["error"] == "legacy error"
+
+
+def test_running_progress_is_rendered_in_session_title_and_metrics(running_progress_data):
+    at = AppTest.from_function(_render_script, kwargs={"data": running_progress_data})
+    at.run(timeout=30)
+    assert not at.exception
+
+    assert any("running #40" in e.label and "26 left" in e.label for e in at.expander)
+    assert any(m.label == "Left" and m.value == "26" for m in at.metric)
 
 
 @pytest.mark.parametrize("status,icon", [("PASSED", "🟢"), ("FAILED", "🔴"), ("SKIPPED", "🟡")])
