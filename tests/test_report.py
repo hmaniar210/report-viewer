@@ -202,6 +202,40 @@ def test_scenario_example_empty_when_not_outline(scn):
     assert rp.scenario_example(scn) == ""
 
 
+def test_scenario_tags_normalizes_and_ignores_non_strings():
+    scn = {"tags": [" release:3.7 ", "generate-report", 123, "", None]}
+    assert rp.scenario_tags(scn) == ["release:3.7", "generate-report"]
+
+
+def test_session_failed_tags_collects_unique_tags_from_failed_scenarios():
+    session = {
+        "scenarios": [
+            {"status": "PASSED", "tags": ["a", "b"]},
+            {"status": "FAILED", "tags": ["b", "c"]},
+            {"status": "FAILED", "tags": ["c", "d"]},
+        ]
+    }
+    assert rp.session_failed_tags(session) == ["b", "c", "d"]
+
+
+def test_filter_report_query_matches_tags():
+    data = {
+        "sessions": [
+            {
+                "sessionNumber": 1,
+                "scenarios": [
+                    {"name": "A", "status": "FAILED", "tags": ["AMOBI-3030"]},
+                    {"name": "B", "status": "PASSED", "tags": ["other"]},
+                ],
+            }
+        ]
+    }
+    out = rp.filter_report(data, query="amobi-3030")
+    kept = out["sessions"][0]["scenarios"]
+    assert len(kept) == 1
+    assert kept[0]["name"] == "A"
+
+
 # --- find_flaky (per-session, step-level) ------------------------------------
 
 

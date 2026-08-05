@@ -49,6 +49,38 @@ def scenario_example(scenario: dict) -> str:
     return ", ".join(f"{key}={value}" for key, value in params.items())
 
 
+def scenario_tags(scenario: dict) -> list[str]:
+    """Normalized list of tag strings for a scenario.
+
+    Reports emit tags as a list of strings. Non-string entries are ignored and
+    surrounding whitespace is stripped so rendering/searching stays predictable.
+    """
+    tags = scenario.get("tags")
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for tag in tags:
+        if isinstance(tag, str):
+            clean = tag.strip()
+            if clean:
+                out.append(clean)
+    return out
+
+
+def session_failed_tags(session: dict) -> list[str]:
+    """Unique tags from FAILED scenarios in encounter order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for scenario in session.get("scenarios") or []:
+        if not scenario or normalize_status(scenario.get("status")) != "FAILED":
+            continue
+        for tag in scenario_tags(scenario):
+            if tag not in seen:
+                seen.add(tag)
+                ordered.append(tag)
+    return ordered
+
+
 _TIMESTAMP_FORMATS = (
     # ``%I`` (12-hour) is tried first so ``07:14:05 pm`` reads as 19:xx. Reports
     # have also shipped a broken midnight spelling (``00:28:04 am``) that ``%I``
@@ -466,11 +498,13 @@ def slowest_scenarios(data: dict, limit: int = 10) -> list[dict]:
 
 
 def _matches_query(scenario: dict, query: str) -> bool:
+    tags = " ".join(scenario_tags(scenario))
     haystack = " ".join(
         [
             scenario.get("name") or "",
             scenario.get("featureFile") or "",
             scenario_example(scenario),
+            tags,
             _scenario_failure(scenario).get("error") or "",
         ]
     ).lower()

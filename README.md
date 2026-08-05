@@ -47,10 +47,13 @@ it changes — handy while a test run keeps rewriting the report (see
 - **Sessions** — every session as a collapsible panel with per-session metrics,
   environment, failed steps, and a full scenario table. A **global filter bar**
   (status + feature-file + **day** multiselects + free-text search over
-  name/feature/example/error) narrows everything at once. For in-progress
-  sessions, if scenario rows include `scenarioIndex` + `scenariosLeft`, the
-  panel also shows current running scenario progress (for example, `running #40`
-  and `26 left`) and marks the active scenario row.
+  name/feature/tags/error) narrows everything at once. The session panel also
+  shows a **Failing tags** summary (unique tags gathered from FAILED scenarios),
+  and each scenario row includes a **Tags** column so you can quickly identify
+  failures by tag. For in-progress sessions, if scenario rows include
+  `scenarioIndex` + `scenariosLeft`, the panel also shows current running
+  scenario progress (for example, `running #40` and `26 left`) and marks the
+  active scenario row.
 
 ## Architecture at a glance
 
@@ -96,6 +99,7 @@ when extending it.
            {
              "name": "...", "featureFile": "...", "status": "FAILED",
              "exampleParams": { "...": "..." },
+             "tags": ["release:3.7", "AMOBI-3030", "locale:en_US"],
              "scenarioIndex": 40,
              "scenariosLeft": 26,
              "startTime": "...", "endTime": "...",

@@ -293,6 +293,7 @@ def render_scenarios(session: dict) -> None:
             "Start": scn.get("startTime", "—"),
             "Scenario": scn.get("name", "(unnamed)"),
             "Example": rp.scenario_example(scn) or "—",
+            "Tags": ", ".join(rp.scenario_tags(scn)) or "—",
             "Feature": scn.get("featureFile", ""),
         }
         if has_progress_fields:
@@ -363,6 +364,13 @@ def render_session(session: dict) -> None:
             elif left is not None:
                 st.info(f"{left} scenario(s) left")
 
+        failed_tags = rp.session_failed_tags(session)
+        if failed_tags:
+            st.markdown("**Failing tags**")
+            st.caption(
+                ", ".join(failed_tags)
+            )
+
         times = st.columns(2)
         times[0].markdown(f"**Start**  \n{session.get('startTime', '—')}")
         times[1].markdown(f"**End**  \n{session.get('endTime', '—')}")
@@ -383,7 +391,7 @@ def render_sessions(data: dict) -> None:
     statuses = filters[0].multiselect("Status", list(rp.VALID_STATUSES), key="flt_status")
     features = filters[1].multiselect("Feature file", all_features, key="flt_feature")
     days = filters[2].multiselect("Day", all_days, key="flt_day")
-    query = filters[3].text_input("Search (name / feature / error)", key="flt_query")
+    query = filters[3].text_input("Search (name / feature / tags / error)", key="flt_query")
 
     filters_active = bool(statuses or features or days or query.strip())
     view = (
