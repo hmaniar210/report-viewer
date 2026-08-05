@@ -221,6 +221,91 @@ def outline_data() -> dict:
     }
 
 
+@pytest.fixture
+def running_progress_data() -> dict:
+    return {
+        "developer": "test-dev",
+        "totalSessions": 1,
+        "sessions": [
+            {
+                "sessionNumber": 7,
+                "status": "in-progress",
+                "scenarioCount": 2,
+                "passed": 1,
+                "failed": 1,
+                "skipped": 0,
+                "scenarios": [
+                    {
+                        "name": "Scenario 39",
+                        "featureFile": "f.feature",
+                        "status": "PASSED",
+                        "scenarioIndex": 39,
+                        "scenariosLeft": 27,
+                    },
+                    {
+                        "name": "Scenario 40",
+                        "featureFile": "f.feature",
+                        "status": "FAILED",
+                        "scenarioIndex": 40,
+                        "scenariosLeft": 26,
+                    },
+                ],
+                "failedScenarios": [
+                    {
+                        "name": "Scenario 40",
+                        "failedStep": "step",
+                        "error": "boom",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.fixture
+def tags_data() -> dict:
+    return {
+        "developer": "test-dev",
+        "totalSessions": 1,
+        "sessions": [
+            {
+                "sessionNumber": 8,
+                "status": "completed",
+                "scenarioCount": 3,
+                "passed": 1,
+                "failed": 2,
+                "skipped": 0,
+                "scenarios": [
+                    {
+                        "name": "Passing scenario",
+                        "featureFile": "f.feature",
+                        "status": "PASSED",
+                        "tags": ["release:3.7", "automated"],
+                    },
+                    {
+                        "name": "Failing scenario 1",
+                        "featureFile": "f.feature",
+                        "status": "FAILED",
+                        "tags": ["AMOBI-3030", "generate-report", "harsh"],
+                        "failure": {"step": "step", "error": "boom"},
+                    },
+                    {
+                        "name": "Failing scenario 2",
+                        "featureFile": "f.feature",
+                        "status": "FAILED",
+                        "tags": ["generate-report", "locale:en_US"],
+                        "failure": {"step": "step", "error": "boom2"},
+                    },
+                ],
+                "failedScenarios": [
+                    {"name": "Failing scenario 1", "failedStep": "step", "error": "boom"},
+                    {"name": "Failing scenario 2", "failedStep": "step", "error": "boom2"},
+                ],
+            }
+        ],
+    }
+
+
 def test_render_report_runs_without_exception_for_outline_data(outline_data):
     at = AppTest.from_function(_render_script, kwargs={"data": outline_data})
     at.run(timeout=30)
@@ -282,6 +367,42 @@ def test_legacy_failure_scenarios_fallback_renders_step_and_error(outline_data):
     legacy = next(f for f in failures if f["name"] == "Legacy failure")
     assert legacy["failedStep"] == "legacy step"
     assert legacy["error"] == "legacy error"
+
+
+def test_running_progress_is_rendered_in_session_title_and_metrics(running_progress_data):
+    at = AppTest.from_function(_render_script, kwargs={"data": running_progress_data})
+    at.run(timeout=30)
+    assert not at.exception
+
+    assert any("running #40" in e.label and "26 left" in e.label for e in at.expander)
+    assert any(m.label == "Left" and m.value == "26" for m in at.metric)
+
+
+def test_sessions_scenario_table_shows_tags_column(tags_data):
+    at = AppTest.from_function(_render_script, kwargs={"data": tags_data})
+    at.run(timeout=30)
+    assert not at.exception
+
+    frames = [df.value for df in at.dataframe if "Tags" in df.value.columns]
+    assert frames, "expected at least one dataframe with a Tags column"
+    values = set()
+    for frame in frames:
+        values |= set(frame["Tags"])
+    assert "AMOBI-3030, generate-report, harsh" in values
+    assert "generate-report, locale:en_US" in values
+
+
+def test_session_summary_shows_failing_tags(tags_data):
+    at = AppTest.from_function(_render_script, kwargs={"data": tags_data})
+    at.run(timeout=30)
+    assert not at.exception
+
+    markdown_text = " ".join(m.value for m in at.markdown)
+    assert "Failing tags" in markdown_text
+    captions = " ".join(c.value for c in at.caption)
+    assert "AMOBI-3030" in captions
+    assert "generate-report" in captions
+    assert "locale:en_US" in captions
 
 
 @pytest.mark.parametrize("status,icon", [("PASSED", "🟢"), ("FAILED", "🔴"), ("SKIPPED", "🟡")])

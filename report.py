@@ -49,6 +49,38 @@ def scenario_example(scenario: dict) -> str:
     return ", ".join(f"{key}={value}" for key, value in params.items())
 
 
+def scenario_tags(scenario: dict) -> list[str]:
+    """Normalized list of tag strings for a scenario.
+
+    Reports emit tags as a list of strings. Non-string entries are ignored and
+    surrounding whitespace is stripped so rendering/searching stays predictable.
+    """
+    tags = scenario.get("tags")
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for tag in tags:
+        if isinstance(tag, str):
+            clean = tag.strip()
+            if clean:
+                out.append(clean)
+    return out
+
+
+def session_failed_tags(session: dict) -> list[str]:
+    """Unique tags from FAILED scenarios in encounter order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for scenario in session.get("scenarios") or []:
+        if not scenario or normalize_status(scenario.get("status")) != "FAILED":
+            continue
+        for tag in scenario_tags(scenario):
+            if tag not in seen:
+                seen.add(tag)
+                ordered.append(tag)
+    return ordered
+
+
 _TIMESTAMP_FORMATS = (
     # ``%I`` (12-hour) is tried first so ``07:14:05 pm`` reads as 19:xx. Reports
     # have also shipped a broken midnight spelling (``00:28:04 am``) that ``%I``
@@ -164,6 +196,55 @@ def per_session_counts(data: dict) -> list[dict]:
         }
         for s in data.get("sessions", []) or []
     ]
+
+
+def _non_negative_int(value: Any) -> int | None:
+    """Best-effort non-negative int coercion (``None`` when absent/invalid)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def session_scenario_progress(session: dict) -> dict | None:
+    """Current session progress inferred from scenarioIndex/scenariosLeft.
+
+    Producers can annotate scenario rows with ``scenarioIndex`` (which scenario
+    number has been reached) and ``scenariosLeft`` (how many are still pending).
+    This helper returns the most advanced row in a session so the UI can show a
+    clear "currently at scenario X, Y left" status while the run is in progress.
+    """
+    best_index: int | None = None
+    best_left: int | None = None
+    for scenario in session.get("scenarios") or []:
+        if not scenario:
+            continue
+        index = _non_negative_int(scenario.get("scenarioIndex"))
+        left = _non_negative_int(scenario.get("scenariosLeft"))
+        if index is None and left is None:
+            continue
+        if (
+            best_index is None
+            or (index is not None and index > best_index)
+            or (index == best_index and left is not None and (best_left is None or left < best_left))
+        ):
+            best_index = index
+            best_left = left
+
+    if best_index is None and best_left is None:
+        return None
+
+    total = best_index + best_left if best_index is not None and best_left is not None else None
+    return {
+        "scenarioIndex": best_index,
+        "scenariosLeft": best_left,
+        "totalScenarios": total,
+    }
 
 
 _HEX = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{20,}\b|0x[0-9a-fA-F]+")
@@ -417,11 +498,13 @@ def slowest_scenarios(data: dict, limit: int = 10) -> list[dict]:
 
 
 def _matches_query(scenario: dict, query: str) -> bool:
+    tags = " ".join(scenario_tags(scenario))
     haystack = " ".join(
         [
             scenario.get("name") or "",
             scenario.get("featureFile") or "",
             scenario_example(scenario),
+            tags,
             _scenario_failure(scenario).get("error") or "",
         ]
     ).lower()

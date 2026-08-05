@@ -47,7 +47,13 @@ it changes — handy while a test run keeps rewriting the report (see
 - **Sessions** — every session as a collapsible panel with per-session metrics,
   environment, failed steps, and a full scenario table. A **global filter bar**
   (status + feature-file + **day** multiselects + free-text search over
-  name/feature/example/error) narrows everything at once.
+  name/feature/tags/error) narrows everything at once. The session panel also
+  shows a **Failing tags** summary (unique tags gathered from FAILED scenarios),
+  and each scenario row includes a **Tags** column so you can quickly identify
+  failures by tag. For in-progress sessions, if scenario rows include
+  `scenarioIndex` + `scenariosLeft`, the panel also shows current running
+  scenario progress (for example, `running #40` and `26 left`) and marks the
+  active scenario row.
 
 ## Architecture at a glance
 
@@ -93,6 +99,9 @@ when extending it.
            {
              "name": "...", "featureFile": "...", "status": "FAILED",
              "exampleParams": { "...": "..." },
+             "tags": ["release:3.7", "AMOBI-3030", "locale:en_US"],
+             "scenarioIndex": 40,
+             "scenariosLeft": 26,
              "startTime": "...", "endTime": "...",
              "durationReadable": "...", "durationMs": 1234,
              "failure": { "step": "...", "error": "...", "location": "..." }
@@ -105,11 +114,12 @@ when extending it.
      ]
    }
    ```
-   The viewer is defensive: sessions that only carry `failedScenarios` (no
-   per-scenario `failure` objects) still work, missing fields fall back to
-   sensible defaults, `exampleParams` is only present for scenario outlines, and
-   `durationMs` is optional (the slowest-scenarios view simply skips scenarios
-   without it).
+  The viewer is defensive: sessions that only carry `failedScenarios` (no
+  per-scenario `failure` objects) still work, missing fields fall back to
+  sensible defaults, `exampleParams` is only present for scenario outlines,
+  `scenarioIndex`/`scenariosLeft` are optional progress hints for in-progress
+  runs, and `durationMs` is optional (the slowest-scenarios view simply skips
+  scenarios without it).
 3. **Render** — `render_report()` renders the top-level metrics and then five
    tabs (Overview / By day / Failure triage / Flaky tests / Sessions), each
    backed by a pure function from `report.py`.

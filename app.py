@@ -11,7 +11,7 @@ import report as rp
 
 st.set_page_config(page_title="WDIO Report Viewer", layout="wide")
 
-STATUS_ICON = {"PASSED": "🟢", "FAILED": "🔴", "SKIPPED": "🟡"}
+STATUS_ICON = {"PASSED": "🟢", "FAILED": "🔴", "SKIPPED": "🟡", "IN-PROGRESS": "🟠", "RUNNING": "🟠"}
 
 # Server-side store for uploaded reports, keyed by an id kept in the URL query
 # params. st.session_state doesn't survive a browser reload (it's a fresh
@@ -265,6 +265,15 @@ def render_scenarios(session: dict) -> None:
         st.caption("No scenarios recorded.")
         return
 
+    progress = rp.session_scenario_progress(session)
+    current_index = progress.get("scenarioIndex") if progress else None
+    session_status = rp.normalize_status(session.get("status"))
+    is_running_session = session_status in {"IN-PROGRESS", "RUNNING"}
+    has_progress_fields = any(
+        isinstance(scn, dict) and ("scenarioIndex" in scn or "scenariosLeft" in scn)
+        for scn in scenarios
+    )
+
     st.markdown(f"**Scenarios ({len(scenarios)})**")
     _info_button(
         "**Scenario Outline rows are uniquely identifiable** — each row carries its "
@@ -276,21 +285,26 @@ def render_scenarios(session: dict) -> None:
         "`region=UK` here — one per Examples row.",
         key=f"info_scenarios_{session.get('sessionNumber', '?')}",
     )
-    st.dataframe(
-        [
-            {
-                "Status": status_badge(scn.get("status")),
-                "Duration": scn.get("durationReadable", "—"),
-                "Start": scn.get("startTime", "—"),
-                "Scenario": scn.get("name", "(unnamed)"),
-                "Example": rp.scenario_example(scn) or "—",
-                "Feature": scn.get("featureFile", ""),
-            }
-            for scn in scenarios
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+    rows = []
+    for scn in scenarios:
+        row = {
+            "Status": status_badge(scn.get("status")),
+            "Duration": scn.get("durationReadable", "—"),
+            "Start": scn.get("startTime", "—"),
+            "Scenario": scn.get("name", "(unnamed)"),
+            "Example": rp.scenario_example(scn) or "—",
+            "Tags": ", ".join(rp.scenario_tags(scn)) or "—",
+            "Feature": scn.get("featureFile", ""),
+        }
+        if has_progress_fields:
+            scn_index = rp._non_negative_int(scn.get("scenarioIndex"))
+            row["Scenario #"] = scn_index if scn_index is not None else "—"
+            scn_left = rp._non_negative_int(scn.get("scenariosLeft"))
+            row["Scenarios left"] = scn_left if scn_left is not None else "—"
+            row["State"] = "Running" if is_running_session and scn_index == current_index else "—"
+        rows.append(row)
+
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
     failures = [scn for scn in scenarios if isinstance(scn.get("failure"), dict)]
     if failures:
@@ -305,16 +319,57 @@ def render_session(session: dict) -> None:
     passed = session.get("passed", 0)
     failed = session.get("failed", 0)
     skipped = session.get("skipped", 0)
+    progress = rp.session_scenario_progress(session)
+    progress_bits = []
+    if progress:
+        if progress.get("scenarioIndex") is not None:
+            progress_bits.append(f"running #{progress['scenarioIndex']}")
+        if progress.get("scenariosLeft") is not None:
+            progress_bits.append(f"{progress['scenariosLeft']} left")
+
     title = (
         f"Session {num} · {status_badge(session.get('status'))} · "
         f"🟢 {passed}  🔴 {failed}  🟡 {skipped} · {session.get('durationReadable', '—')}"
     )
+    if progress_bits:
+        title += " · " + " · ".join(progress_bits)
+
     with st.expander(title, expanded=False):
-        cols = st.columns(4)
-        cols[0].metric("Scenarios", session.get("scenarioCount", 0))
-        cols[1].metric("Passed", passed)
-        cols[2].metric("Failed", failed)
-        cols[3].metric("Skipped", skipped)
+        metrics = [
+            ("Scenarios", session.get("scenarioCount", 0)),
+            ("Passed", passed),
+            ("Failed", failed),
+            ("Skipped", skipped),
+        ]
+        if progress and progress.get("scenariosLeft") is not None:
+            metrics.append(("Left", progress["scenariosLeft"]))
+
+        cols = st.columns(len(metrics))
+        for col, (label, value) in zip(cols, metrics):
+            col.metric(label, value)
+
+        status = rp.normalize_status(session.get("status"))
+        is_running_session = status in {"IN-PROGRESS", "RUNNING"}
+        if is_running_session and progress:
+            index = progress.get("scenarioIndex")
+            left = progress.get("scenariosLeft")
+            total = progress.get("totalScenarios")
+            if index is not None and left is not None and total:
+                done = max(total - left, 0)
+                st.progress(min(done / total, 1.0), text=f"Running scenario {index} of {total} ({left} left)")
+            elif index is not None and left is not None:
+                st.info(f"Running scenario {index} ({left} left)")
+            elif index is not None:
+                st.info(f"Running scenario {index}")
+            elif left is not None:
+                st.info(f"{left} scenario(s) left")
+
+        failed_tags = rp.session_failed_tags(session)
+        if failed_tags:
+            st.markdown("**Failing tags**")
+            st.caption(
+                ", ".join(failed_tags)
+            )
 
         times = st.columns(2)
         times[0].markdown(f"**Start**  \n{session.get('startTime', '—')}")
@@ -336,7 +391,7 @@ def render_sessions(data: dict) -> None:
     statuses = filters[0].multiselect("Status", list(rp.VALID_STATUSES), key="flt_status")
     features = filters[1].multiselect("Feature file", all_features, key="flt_feature")
     days = filters[2].multiselect("Day", all_days, key="flt_day")
-    query = filters[3].text_input("Search (name / feature / error)", key="flt_query")
+    query = filters[3].text_input("Search (name / feature / tags / error)", key="flt_query")
 
     filters_active = bool(statuses or features or days or query.strip())
     view = (
